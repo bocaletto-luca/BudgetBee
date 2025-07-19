@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>BudgetBee – Personal Budget Planner</title>
+  <meta name="description" content="BudgetBee: single-page personal budget planner with interactive tables, charts, export/import and dark mode.">
+  <meta name="author" content="Bocaletto Luca"/>
+
+  <!-- Tabulator CSS -->
+  <link href="https://unpkg.com/tabulator-tables@5.4.4/dist/css/tabulator.min.css" rel="stylesheet"/>
+
+  <style>
+    :root {
+      --bg: #f0f2f5;
+      --card: #fff;
+      --text: #333;
+      --primary: #28a745;
+      --primary-dark: #1e7e34;
+      --expense: #dc3545;
+      --income: #17a2b8;
+    }
+    [data-theme="dark"] {
+      --bg: #1e1e1e;
+      --card: #2c2c2c;
+      --text: #ddd;
+    }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body {
+      display:flex; flex-direction:column; min-height:100vh;
+      font-family:Arial,sans-serif; background:var(--bg); color:var(--text);
+    }
+    header, footer {
+      background:var(--primary); color:#fff; text-align:center; padding:1rem;
+    }
+    footer a { color:#fff; text-decoration:underline; }
+    main {
+      flex:1; max-width:900px; width:100%; margin:1rem auto; padding:1rem;
+    }
+    .form-row {
+      display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:1rem;
+    }
+    .form-row input, .form-row select, .form-row button {
+      padding:.5rem; font-size:1rem; border:1px solid #ccc; border-radius:4px;
+    }
+    .form-row button {
+      background:var(--primary); color:#fff; border:none; cursor:pointer;
+      transition:background .2s;
+    }
+    .form-row button:hover { background:var(--primary-dark); }
+    .controls {
+      display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:1rem;
+    }
+    .controls button {
+      padding:.5rem 1rem; border:none; border-radius:4px;
+      background:var(--primary); color:#fff; cursor:pointer;
+      transition:background .2s;
+    }
+    .controls button:hover { background:var(--primary-dark); }
+    .hidden { display:none; }
+    #txTable { margin-bottom:1rem; }
+    #charts { display:flex; flex-wrap:wrap; gap:1rem; }
+    #charts canvas { background:var(--card); border-radius:6px; padding:1rem; flex:1; min-width:200px; }
+  </style>
+</head>
+<body data-theme="light">
+  <header>
+    <h1>BudgetBee</h1>
+    <p>Track your income & expenses with interactive tables and charts.</p>
+  </header>
+
+  <main>
+    <!-- Transaction Form -->
+    <div class="form-row">
+      <select id="txType">
+        <option value="expense">Expense</option>
+        <option value="income">Income</option>
+      </select>
+      <input type="text" id="txCategory" placeholder="Category"/>
+      <input type="number" id="txAmount" placeholder="Amount" step="0.01"/>
+      <input type="date" id="txDate"/>
+      <input type="text" id="txNote" placeholder="Note"/>
+      <button id="btnAddTx">Add</button>
+    </div>
+
+    <!-- Export / Import / Theme -->
+    <div class="controls">
+      <button id="btnExport">Export JSON</button>
+      <button id="btnImport">Import JSON</button>
+      <button id="btnTheme">🌙 Dark Mode</button>
+      <input type="file" id="importInput" accept=".json" class="hidden"/>
+    </div>
+
+    <!-- Transactions Table -->
+    <div id="txTable"></div>
+
+    <!-- Charts -->
+    <div id="charts">
+      <canvas id="pieChart" width="300" height="300"></canvas>
+      <canvas id="barChart" width="300" height="300"></canvas>
+    </div>
+  </main>
+
+  <footer>
+    © 2025 Bocaletto Luca | 
+    <a href="https://github.com/bocaletto-luca/BudgetBee" target="_blank" rel="noopener">Repository</a>
+  </footer>
+
+  <!-- Dependencies -->
+  <script src="https://unpkg.com/tabulator-tables@5.4.4/dist/js/tabulator.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const STORAGE_KEY = 'BudgetBeeDB';
+    let db = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{"transactions":[]}');
+    const saveDB = () => localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+
+    // UI Refs
+    const txType     = document.getElementById('txType');
+    const txCat      = document.getElementById('txCategory');
+    const txAmt      = document.getElementById('txAmount');
+    const txDate     = document.getElementById('txDate');
+    const txNote     = document.getElementById('txNote');
+    const btnAddTx   = document.getElementById('btnAddTx');
+    const btnExport  = document.getElementById('btnExport');
+    const btnImport  = document.getElementById('btnImport');
+    const importInput= document.getElementById('importInput');
+    const btnTheme   = document.getElementById('btnTheme');
+    const body       = document.body;
+
+    const pieCtx     = document.getElementById('pieChart').getContext('2d');
+    const barCtx     = document.getElementById('barChart').getContext('2d');
+    let pieChart, barChart;
+
+    // Initialize Tabulator
+    const table = new Tabulator('#txTable', {
+      layout: 'fitColumns',
+      placeholder: 'No transactions yet',
+      data: db.transactions,
+      columns: [
+        { title:"Type",    field:"type",     width:80, editor:"select", editorParams:{values:{"expense":"Expense","income":"Income"}} },
+        { title:"Category",field:"category", editor:"input", headerFilter:"input" },
+        { title:"Amount",  field:"amount",   formatter:(cell)=> {
+            let v=cell.getValue();
+            return (cell.getRow().getData().type==='expense' ? '-' : '+') + parseFloat(v).toFixed(2);
+          }, editor:"number", hozAlign:"right"
+        },
+        { title:"Date",    field:"date",     formatter:(cell)=> dayjs(cell.getValue()).format('YYYY-MM-DD'), editor:"input" },
+        { title:"Note",    field:"note",     editor:"input" },
+        { formatter:"buttonCross", width:40, hozAlign:"center", cellClick:(e,cell)=>{
+            const id = cell.getRow().getData().id;
+            db.transactions = db.transactions.filter(t=>t.id!==id);
+            saveDB(); table.setData(db.transactions); updateCharts();
+          }}
+      ],
+      cellEdited: (cell) => {
+        const data = cell.getRow().getData();
+        const idx  = db.transactions.findIndex(t=>t.id===data.id);
+        db.transactions[idx] = data;
+        saveDB(); updateCharts();
+      }
+    });
+
+    // Add Transaction
+    btnAddTx.addEventListener('click', () => {
+      const type   = txType.value;
+      const category= txCat.value.trim();
+      const amount = parseFloat(txAmt.value);
+      const date   = txDate.value;
+      const note   = txNote.value.trim();
+      if (!category || isNaN(amount) || !date) {
+        return alert('Please fill Category, Amount & Date');
+      }
+      const tx = {
+        id: Date.now().toString(),
+        type, category, amount, date, note
+      };
+      db.transactions.push(tx);
+      saveDB();
+      table.addRow(tx);
+      txCat.value = ''; txAmt.value=''; txDate.value=''; txNote.value='';
+      updateCharts();
+    });
+
+    // Export / Import
+    btnExport.addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(db,null,2)], { type:'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'budgetbee-data.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+    btnImport.addEventListener('click', () => importInput.click());
+    importInput.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          db = JSON.parse(reader.result);
+          saveDB();
+          table.setData(db.transactions);
+          updateCharts();
+          alert('Data imported');
+        } catch {
+          alert('Invalid JSON');
+        }
+      };
+      reader.readAsText(file);
+      importInput.value = '';
+    });
+
+    // Dark/Light Mode
+    btnTheme.addEventListener('click', () => {
+      const next = body.dataset.theme==='light' ? 'dark' : 'light';
+      body.dataset.theme = next;
+      btnTheme.textContent = next==='dark' ? '☀️ Light Mode' : '🌙 Dark Mode';
+    });
+
+    // Charts
+    function updateCharts(){
+      const now   = dayjs();
+      const m      = now.format('YYYY-MM');
+      // Pie: breakdown of current month's expenses by category
+      const monthTx = db.transactions.filter(t=>t.date.startsWith(m) && t.type==='expense');
+      const pieData = {};
+      monthTx.forEach(t=> pieData[t.category] = (pieData[t.category]||0) + t.amount );
+      const pieLabels = Object.keys(pieData);
+      const pieValues = pieLabels.map(l=> pieData[l]);
+      if (pieChart) pieChart.destroy();
+      pieChart = new Chart(pieCtx, {
+        type: 'pie',
+        data: { labels: pieLabels, datasets:[{ data: pieValues, backgroundColor: pieLabels.map((_,i)=>`hsl(${i*60},70%,50%)`) }] }
+      });
+
+      // Bar: net balance per month (last 6 months)
+      const last6 = [...Array(6)].map((_,i)=> now.subtract(i,'month').format('YYYY-MM')).reverse();
+      const barData = last6.map(key => {
+        const txs = db.transactions.filter(t=>t.date.startsWith(key));
+        return txs.reduce((sum,t)=> sum + (t.type==='income'?t.amount:-t.amount), 0);
+      });
+      if (barChart) barChart.destroy();
+      barChart = new Chart(barCtx, {
+        type: 'bar',
+        data: { labels: last6, datasets:[{ label:'Net Balance', data:barData, backgroundColor: last6.map(v=> barData[last6.indexOf(v)]>=0? 'var(--income)':'var(--expense)') }] },
+        options: { scales:{ y:{ beginAtZero:true } } }
+      });
+    }
+
+    // Init
+    Notification.requestPermission();
+    table.setData(db.transactions);
+    updateCharts();
+  });
+  </script>
+</body>
+</html>
